@@ -1,0 +1,27 @@
+# Optional EC2 target: one folder per demo under /srv/demos/<slug>/,
+# served at https://<slug>.demo.foundryframe.com with on-demand TLS.
+# DNS: one wildcard record  *.demo  A  <Elastic IP>.
+{
+	on_demand_tls {
+		# Caddy asks the admin before issuing a certificate; only live EC2 demos get one.
+		ask https://www.foundryframe.com/api/demo-builder/domain-check
+	}
+}
+
+*.demo.foundryframe.com {
+	tls {
+		on_demand
+	}
+
+	@slug header_regexp slug Host ^([a-z0-9][a-z0-9-]{1,46}[a-z0-9])\.demo\.foundryframe\.com$
+	handle @slug {
+		root * /srv/demos/{re.slug.1}
+		header X-Robots-Tag "noindex, nofollow"
+		try_files {path} {path}.html {path}/index.html
+		file_server
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

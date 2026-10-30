@@ -1,0 +1,48 @@
+# Started by the admin's daily expiry cron, or when a demo is deleted
+# (repository_dispatch event "expire-demos", payload { demos: [...] }).
+name: Expire demos
+
+on:
+  repository_dispatch:
+    types: [expire-demos]
+
+permissions:
+  contents: read
+
+jobs:
+  expire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DEMOS_JSON: ${{ toJSON(github.event.client_payload.demos) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm ci
+
+      - name: Remove Vercel deployments
+        id: expire
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: node src/cli.ts expire
+
+      - name: Remove EC2 folders
+        if: steps.expire.outputs.ec2_slugs != ''
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_KNOWN_HOSTS: ${{ vars.EC2_KNOWN_HOSTS }}
+          SLUGS: ${{ steps.expire.outputs.ec2_slugs }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/demo_key && chmod 600 ~/.ssh/demo_key
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          for slug in $SLUGS; do
+            ssh -i ~/.ssh/demo_key "deploy@$EC2_HOST" "rm -rf -- /srv/demos/$slug"
+          done

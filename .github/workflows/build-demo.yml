@@ -1,0 +1,113 @@
+# Started by the Foundry Frame admin with repository_dispatch (event "build-demo").
+# Payload: { demoId, slug, templateRepo, templateVersion, target, jobUrl }.
+# Payload values only reach shell steps through env vars, never ${{ }} inside run:,
+# so a crafted value can't inject commands.
+name: Build demo
+
+on:
+  repository_dispatch:
+    types: [build-demo]
+
+concurrency:
+  group: demo-${{ github.event.client_payload.demoId }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      JOB_URL: ${{ github.event.client_payload.jobUrl }}
+      TEMPLATE_REPO: ${{ github.event.client_payload.templateRepo }}
+      TEMPLATE_VERSION: ${{ github.event.client_payload.templateVersion }}
+      TARGET: ${{ github.event.client_payload.target }}
+      ADMIN_ORIGIN: ${{ vars.ADMIN_ORIGIN }}
+      ALLOWED_TEMPLATE_OWNER: ${{ vars.ALLOWED_TEMPLATE_OWNER }}
+      DEMO_DOMAIN: ${{ vars.DEMO_DOMAIN }}
+      DEMO_BUILDER_SECRET: ${{ secrets.DEMO_BUILDER_SECRET }}
+      BUILD_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Check payload
+        run: |
+          [[ "$TEMPLATE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Bad template repo"; exit 1; }
+          [[ "$TEMPLATE_VERSION" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "Bad template version"; exit 1; }
+          [[ "$TARGET" == "vercel" || "$TARGET" == "ec2" ]] || { echo "Bad target"; exit 1; }
+          if [[ -n "$ALLOWED_TEMPLATE_OWNER" && "${TEMPLATE_REPO%%/*}" != "$ALLOWED_TEMPLATE_OWNER" ]]; then
+            echo "Template repo must belong to $ALLOWED_TEMPLATE_OWNER"; exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.templateRepo }}
+          ref: ${{ github.event.client_payload.templateVersion }}
+          token: ${{ secrets.TEMPLATES_TOKEN }}
+          path: template
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install builder
+        working-directory: builder
+        run: npm ci
+
+      - name: Fetch job, write site.json and images
+        id: prepare
+        run: node builder/src/cli.ts prepare --template-dir template
+
+      - name: Build template
+        working-directory: template
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build
+
+      - name: Add demo wrapper (noindex, banner, view ping)
+        run: node builder/src/cli.ts wrap --out-dir template/out
+
+      - name: Deploy to Vercel
+        id: vercel
+        if: env.TARGET == 'vercel'
+        working-directory: builder
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: node src/cli.ts deploy-vercel --out-dir ../template/out
+
+      - name: Deploy to EC2
+        id: ec2
+        if: env.TARGET == 'ec2'
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_KNOWN_HOSTS: ${{ vars.EC2_KNOWN_HOSTS }}
+          SLUG: ${{ steps.prepare.outputs.slug }}
+        run: |
+          [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{1,46}[a-z0-9]$ ]] || { echo "Bad slug"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/demo_key && chmod 600 ~/.ssh/demo_key
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          rsync -az --delete -e "ssh -i ~/.ssh/demo_key" template/out/ "deploy@$EC2_HOST:/srv/demos/$SLUG/"
+          echo "url=https://$SLUG.$DEMO_DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "deployment_id=ec2:$SLUG" >> "$GITHUB_OUTPUT"
+
+      - name: Report live
+        env:
+          URL: ${{ steps.vercel.outputs.url || steps.ec2.outputs.url }}
+          DEPLOYMENT_ID: ${{ steps.vercel.outputs.deployment_id || steps.ec2.outputs.deployment_id }}
+        run: node builder/src/cli.ts report --status live --url "$URL" --deployment-id "$DEPLOYMENT_ID"
+
+      - name: Report failure
+        if: failure()
+        run: |
+          if [ -f "$RUNNER_TEMP/job.json" ]; then
+            node builder/src/cli.ts report --status failed --error "Build failed. Open the build log for details."
+          fi

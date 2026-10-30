@@ -1,0 +1,21 @@
+{
+  "name": "ff-demo-builder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Builds and deploys Foundry Frame demo sites: fetches a signed job, fills a template with site.json and assets, builds it, and deploys the static output.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5",
+    "vercel": "^65.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^6.0.3"
+  }
+}
